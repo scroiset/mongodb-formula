@@ -2,20 +2,35 @@ base:
   pkgrepo.managed:
     - humanname: 10Gen Repo
     - name: deb http://downloads-distro.mongodb.org/repo/ubuntu-upstart dist 10gen
-    - dist: precise
+    - dist: dist
     - file: /etc/apt/sources.list.d/mongodb.list
     - keyid: 7F0CEB10
     - keyserver: keyserver.ubuntu.com
     - require_in:
-      - pkg: mongodb-org
       - pkg: mongodb-org-server
       - pkg: mongodb-org-shell
       - pkg: mongodb-org-mongos
       - pkg: mongodb-org-tools
 
-#  pkg.latest:
-#    - name: mongodb-org-server
-#    - refresh: False
+server:
+  pkg.latest:
+    - name: mongodb-org-server
+    - refresh: False
+
+shell:
+  pkg.latest:
+    - name: mongodb-org-shell
+    - refresh: False
+mongos:
+  pkg.latest:
+    - name: mongodb-org-mongos
+    - refresh: False
+
+tools:
+  pkg.latest:
+    - name: mongodb-org-tools
+    - refresh: False
+
 
 #mongodb:
 #  pkg:
