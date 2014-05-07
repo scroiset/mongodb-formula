@@ -1,0 +1,266 @@
+# heat -d stack-create  -f devstack_standalone.yaml -P 'KeyName=swannDev1' dev-swann
+HeatTemplateFormatVersion: '2012-12-12'
+Description: Setup an Openstack cloud using devstack for installation
+Parameters:
+  KeyName: 
+    Description: Name of an existing KeyPair to enable SSH
+    Type: String
+    Default: 'swannDev1'
+  Distribution: 
+    Description: Name of the image
+    Type: String
+    Default: 'ubuntu-12_04-x86_64-xlcloud'
+  ControllerFlavor:
+    Description: Instance flavor of the Controller node
+    Type: String
+    Default: 'm1.large'
+
+  Username: 
+    Description: Username
+    Type: String
+    Default: 'swann'
+  Password: 
+    Description: Username
+    Type: String
+    Default: 'passs'
+
+Resources:
+  IPAddress: {Type: 'AWS::EC2::EIP'}
+  IPAssoc:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: {Ref: SaltMaster}
+      EIP: {Ref: IPAddress}
+
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP access via port 80 plus SSH access
+      VpcId: abcd
+      SecurityGroupIngress:
+      - {CidrIp: 0.0.0.0/0, FromPort: '-1', IpProtocol: icmp, ToPort: '-1'}
+      - {CidrIp: 0.0.0.0/0, FromPort: '80', IpProtocol: tcp, ToPort: '80'}
+      - {CidrIp: 0.0.0.0/0, FromPort: '22', IpProtocol: tcp, ToPort: '22'}
+      - {CidrIp: 0.0.0.0/0, FromPort: '55672', IpProtocol: tcp, ToPort: '55672'}
+      - {CidrIp: 0.0.0.0/0, FromPort: '15672', IpProtocol: tcp, ToPort: '15672'}
+      - {CidrIp: 0.0.0.0/0, FromPort: '5672', IpProtocol: tcp, ToPort: '5672'}
+      - {CidrIp: 0.0.0.0/0, FromPort: '9292', IpProtocol: tcp, ToPort: '9292'}
+      # Salt master
+      - {CidrIp: 0.0.0.0/0, FromPort: '4505', IpProtocol: tcp, ToPort: '4505'}
+      - {CidrIp: 0.0.0.0/0, FromPort: '4506', IpProtocol: tcp, ToPort: '4506'}
+      # mongo ports
+      - {CidrIp: 0.0.0.0/0, FromPort: '27017', IpProtocol: tcp, ToPort: '27017'}
+      - {CidrIp: 0.0.0.0/0, FromPort: '28018', IpProtocol: tcp, ToPort: '28018'}
+      - {CidrIp: 0.0.0.0/0, FromPort: '27019', IpProtocol: tcp, ToPort: '27019'}
+      - {CidrIp: 0.0.0.0/0, FromPort: '28019', IpProtocol: tcp, ToPort: '28019'}
+
+  SaltMaster:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: {Ref: Distribution}
+      KeyName: {Ref: KeyName}
+      InstanceType: 'm1.small'
+      SecurityGroups:
+      - {Ref: NodeSecurityGroup}
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - ''
+          - - |-
+                #!/bin/sh -ve
+                export http_proxy=http://10.197.217.62:3128 
+                export https_proxy=http://10.197.217.62:3128
+                MY_HOSTNAME=$(http_proxy= curl -s http://169.254.169.254/latest/meta-data/local-hostname)
+                #hostname $MY_HOSTNAME
+                echo "PermitTunnel yes" >> /etc/ssh/sshd_config;
+                echo "    Tunnel yes" >> /etc/ssh/ssh_config
+                service ssh restart
+                echo 127.0.0.1 $MY_HOSTNAME >> /etc/hosts
+                echo 127.0.0.1 $(hostname) >> /etc/hosts
+                MY_IPV4=$(http_proxy= curl -s http://169.254.169.254/latest/meta-data/local-ipv4/)
+                #CFN_SERVER=$(egrep -o -e '([0-9]{1,3}\.+){3}[0-9]{1,3}' /var/lib/cloud/data/cfn-metadata-server)
+                echo "export http_proxy=$http_proxy" >> /etc/profile.d/http_proxy.sh
+                echo "export https_proxy=$https_proxy" >> /etc/profile.d/http_proxy.sh
+                echo "export no_proxy=127.0.0.1,localhost,169.254.169.254,$MY_IPV4" >> /etc/profile.d/http_proxy.sh
+                #echo "export no_proxy=127.0.0.1,localhost,169.254.169.254,$CFN_SERVER,$MY_IPV4" >> /etc/profile.d/http_proxy.sh
+                echo 'Acquire::http::Proxy "' $http_proxy'";' >> /etc/apt/apt.conf
+                . /etc/profile.d/http_proxy.sh
+                add-apt-repository -y ppa:saltstack/salt
+                apt-get update
+                apt-get -y install python-argparse cloud-init python-psutil python-pip
+                apt-get -y remove python-boto
+                pip install 'boto==2.5.2' heat-cfntools
+                apt-get install -y salt-master
+                mkdir -p /srv/salt
+                echo 'file_roots:\n  base:\n    - /srv/salt\n' >> /etc/salt/master
+                cd /srv/salt/ && git clone https://github.com/scroiset/mongodb-formula.git
+                salt-master -d
+
+  Node:
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            /tmp/masterip: &salt-master-ip
+              content:
+                Fn::Join:
+                  - ''
+                  - - 'Fn::GetAtt': [SaltMaster, PrivateIp]
+                    - '
+
+                      '
+            /etc/mongodb.conf:
+              content:
+                Fn::Base64: 
+                  Fn::Join:
+                  - ''
+                  - - |-
+                        dbpath=/var/lib/mongodb
+                        logpath=/var/log/mongodb/mongod.log
+                        bind_ip = 0.0.0.0
+                        port = 27018
+                        replSet = rs0
+                        httpinterface = true
+                        shardsvr = true
+                        logappend = yes
+            /etc/mongodb_config.conf: &mongo-config
+              content:
+                Fn::Base64: 
+                  Fn::Join:
+                  - ''
+                  - - |-
+                        dbpath=/var/lib/mongodb
+                        logpath=/var/log/mongodb/mongod.log
+                        bind_ip = 0.0.0.0
+                        port = 27019
+                        configsvr = true
+                        logappend = yes
+            /etc/mongos.conf: &mongos
+              content:
+                Fn::Base64: 
+                  Fn::Join:
+                  - ''
+                  - - |-
+                        configdb = mongo1:27019,mongo2:27019,mongo3:27019
+                        logpath=/var/log/mongodb/mongod.log
+                        bind_ip = 0.0.0.0
+                        port = 27017
+                        logappend = yes
+        
+    Properties:
+      ImageId: {Ref: Distribution}
+      InstanceType: {Ref: ControllerFlavor}
+      KeyName: {Ref: KeyName}
+      SecurityGroups:
+      - {Ref: NodeSecurityGroup}
+      UserData: &bootstrap
+        Fn::Base64: 
+          Fn::Join:
+          - ''
+          - - |-
+                #!/bin/sh -ve
+                export http_proxy=http://10.197.217.62:3128 
+                export https_proxy=http://10.197.217.62:3128
+                MY_HOSTNAME=$(http_proxy= curl -s http://169.254.169.254/latest/meta-data/local-hostname)
+                #hostname $MY_HOSTNAME
+                echo "PermitTunnel yes" >> /etc/ssh/sshd_config;
+                echo "    Tunnel yes" >> /etc/ssh/ssh_config
+                service ssh restart
+                echo 127.0.0.1 $MY_HOSTNAME >> /etc/hosts
+                echo 127.0.0.1 $(hostname) >> /etc/hosts
+                MY_IPV4=$(http_proxy= curl -s http://169.254.169.254/latest/meta-data/local-ipv4/)
+                #CFN_SERVER=$(egrep -o -e '([0-9]{1,3}\.+){3}[0-9]{1,3}' /var/lib/cloud/data/cfn-metadata-server)
+                echo "export http_proxy=$http_proxy" >> /etc/profile.d/http_proxy.sh
+                echo "export https_proxy=$https_proxy" >> /etc/profile.d/http_proxy.sh
+                echo "export no_proxy=127.0.0.1,localhost,169.254.169.254,$MY_IPV4" >> /etc/profile.d/http_proxy.sh
+                #echo "export no_proxy=127.0.0.1,localhost,169.254.169.254,$CFN_SERVER,$MY_IPV4" >> /etc/profile.d/http_proxy.sh
+                echo 'Acquire::http::Proxy "' $http_proxy'";' >> /etc/apt/apt.conf
+                . /etc/profile.d/http_proxy.sh
+                # mongodb install
+                #sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv 7F0CEB10
+                #echo 'deb http://downloads-distro.mongodb.org/repo/ubuntu-upstart dist 10gen' > /etc/apt/sources.list.d/mongodb.list
+                add-apt-repository -y ppa:saltstack/salt
+                apt-get -y remove python-boto
+                pip install "boto==2.5.2" heat-cfntools
+                #service mongod stop
+                cfn-init
+                #service mongo_conf start
+                #service mongos start
+                #service mongo_shard start
+                ##apt-get install -y salt-master
+                apt-get install -y salt-minion git
+                echo "master: $(cat /tmp/masterip)" >> /etc/salt/minion
+                service salt-minion restart
+                salt-call grains.setval cluster mongo
+  Node2:
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            /tmp/masterip: *salt-master-ip
+            /etc/mongodb.conf:
+              content:
+                Fn::Base64: 
+                  Fn::Join:
+                  - ''
+                  - - |-
+                        dbpath=/var/lib/mongodb
+                        logpath=/var/log/mongodb/mongod.log
+                        bind_ip = 0.0.0.0
+                        port = 27018
+                        replSet = rs0
+                        httpinterface = true
+                        shardsvr = true
+                        logappend = yes
+            /etc/mongodb_config.conf: *mongo-config
+            /etc/mongos.conf: *mongos
+    Properties:
+      ImageId: {Ref: Distribution}
+      InstanceType: {Ref: ControllerFlavor}
+      KeyName: {Ref: KeyName}
+      SecurityGroups:
+      - {Ref: NodeSecurityGroup}
+      UserData: *bootstrap
+
+  Node3:
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            /tmp/masterip: *salt-master-ip
+            /etc/mongodb.conf:
+              content:
+                Fn::Base64: 
+                  Fn::Join:
+                  - ''
+                  - - |-
+                        dbpath=/var/lib/mongodb
+                        logpath=/var/log/mongodb/mongod.log
+                        bind_ip = 0.0.0.0
+                        port = 27018
+                        replSet = rs1
+                        httpinterface = true
+                        shardsvr = true
+                        logappend = yes
+            /etc/mongodb_config.conf: *mongo-config
+            /etc/mongos.conf: *mongos
+    Properties:
+      ImageId: {Ref: Distribution}
+      InstanceType: {Ref: ControllerFlavor}
+      KeyName: {Ref: KeyName}
+      SecurityGroups:
+      - {Ref: NodeSecurityGroup}
+      UserData: *bootstrap
+
+Outputs:
+  Horizon URL:
+    Value:
+      Fn::Join:
+      - ''
+      - - http://
+        - {Ref: IPAddress}
+        - /
+    Description: URL for Horizon dashboard
